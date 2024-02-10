@@ -52,6 +52,9 @@ pub struct DeviceInfo {
     #[cfg(target_os = "macos")]
     pub(crate) location_id: u32,
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) device: std::sync::Arc<crate::platform::UniqueUsbDevice>,
+
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(crate) bus_id: String,
 
@@ -105,6 +108,11 @@ impl DeviceInfo {
         #[cfg(target_os = "macos")]
         {
             DeviceId(self.registry_id)
+        }
+
+        #[cfg(target_family = "wasm")]
+        {
+            DeviceId(crate::platform::DeviceId::from_device(&self.device))
         }
     }
 
@@ -457,7 +465,7 @@ impl UsbControllerType {
         match lower_s
             .find("hci")
             .filter(|i| *i > 0)
-            .and_then(|i| lower_s.as_bytes().get(i - 1))
+            .and_then(|i| lower_s.as_bytes().get(i - 1).copied())
         {
             Some(b'x') => Some(UsbControllerType::XHCI),
             Some(b'e') => Some(UsbControllerType::EHCI),
@@ -640,6 +648,11 @@ impl BusInfo {
         #[cfg(target_os = "macos")]
         {
             self.name.as_deref()
+        }
+
+        #[cfg(target_family = "wasm")]
+        {
+            Some("webusb")
         }
     }
 }
