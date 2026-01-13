@@ -74,6 +74,25 @@ impl From<Error> for io::Error {
     }
 }
 
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        let kind = match err.kind() {
+            io::ErrorKind::NotConnected => ErrorKind::Disconnected,
+            io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound => ErrorKind::NotFound,
+            io::ErrorKind::Unsupported => ErrorKind::Unsupported,
+            _ => ErrorKind::Other,
+        };
+        Error::new(kind, "IO error")
+    }
+}
+
+impl From<std::convert::Infallible> for Error {
+    fn from(_: std::convert::Infallible) -> Self {
+        unreachable!()
+    }
+}
+
 /// General category of error as part of an [`Error`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]

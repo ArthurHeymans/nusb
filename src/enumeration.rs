@@ -477,6 +477,14 @@ impl UsbControllerType {
     }
 }
 
+/// Information about a system USB bus (stub for WebUSB).
+///
+/// WebUSB does not support enumerating buses, so this is a placeholder.
+#[cfg(target_arch = "wasm32")]
+pub struct BusInfo {
+    _private: (),
+}
+
 /// Information about a system USB bus.
 ///
 /// Platform-specific fields:

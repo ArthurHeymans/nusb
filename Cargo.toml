@@ -44,16 +44,21 @@ futures-io = { version = "0.3", optional = true }
 
 
 [target.'cfg(target_arch="wasm32")'.dependencies]
-web-sys = { version = "*", features = [
+atomic-waker = "1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
     "Document",
     "Window",
     "Navigator",
     "Usb",
     "UsbDevice",
+    "UsbDeviceFilter",
     "UsbDeviceRequestOptions",
     "UsbConfiguration",
     "UsbInterface",
     "UsbAlternateInterface",
+    "UsbEndpoint",
     "UsbControlTransferParameters",
     "UsbRequestType",
     "UsbRecipient",
@@ -62,10 +67,12 @@ web-sys = { version = "*", features = [
     "UsbOutTransferResult",
     "UsbDirection",
     "UsbConnectionEvent",
+    "UsbConnectionEventInit",
     "WorkerGlobalScope",
     "WorkerNavigator",
 ] }
-wasm-bindgen-futures = { version = "*" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 
 [features]
 # Use the `blocking` crate for making blocking IO async
@@ -75,7 +82,7 @@ smol = ["dep:blocking", "dep:futures-io"]
 tokio = ["dep:tokio"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(web_sys_unstable_apis)'] }
 
 [package.metadata.docs.rs]
 all-features = true

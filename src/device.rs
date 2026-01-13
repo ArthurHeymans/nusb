@@ -763,6 +763,7 @@ impl<EpType: BulkOrInterrupt, Dir: EndpointDirection> Endpoint<EpType, Dir> {
     ///
     /// ## Panics
     ///  * if any transfer is already pending.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn transfer_blocking(&mut self, buf: Buffer, timeout: Duration) -> Completion {
         assert!(self.pending() == 0, "a transfer is already pending");
         self.submit(buf);

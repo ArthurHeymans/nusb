@@ -1,11 +1,13 @@
 use std::{
     collections::VecDeque,
-    io::{Error, ErrorKind},
+    io::{Error as IoError, ErrorKind as IoErrorKind},
     mem::ManuallyDrop,
     sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
+
+use crate::{Error, ErrorKind};
 
 pub use private::UniqueUsbDevice;
 use wasm_bindgen_futures::{js_sys::Array, spawn_local, wasm_bindgen::JsCast, JsFuture};
@@ -25,7 +27,7 @@ use crate::{
         internal::{notify_completion, take_completed_from_queue, Idle, Notify, Pending},
         Buffer, Completion, ControlIn, ControlOut, Direction, TransferError,
     },
-    ClaimEndpointError, DeviceInfo, MaybeFuture, Speed,
+    DeviceInfo, MaybeFuture, Speed,
 };
 
 use super::{
@@ -79,35 +81,60 @@ pub(crate) struct WebusbDevice {
 impl WebusbDevice {
     pub(crate) fn from_device_info(
         d: &DeviceInfo,
-    ) -> impl MaybeFuture<Output = Result<Arc<WebusbDevice>, std::io::Error>> {
+    ) -> impl MaybeFuture<Output = Result<Arc<WebusbDevice>, Error>> {
         let target_device = d.device.clone();
         let speed = d.speed;
         ActualFuture::new(async move {
-            let usb = super::usb()?;
-            let devices = JsFuture::from(usb.get_devices())
-                .await
-                .map_err(js_value_to_io_error)?;
-            let devices: Array = JsCast::unchecked_from_js(devices);
+            async fn inner(
+                target_device: Arc<UniqueUsbDevice>,
+                speed: Option<Speed>,
+            ) -> Result<Arc<WebusbDevice>, IoError> {
+                let usb = super::usb()?;
+                let devices = JsFuture::from(usb.get_devices())
+                    .await
+                    .map_err(js_value_to_io_error)?;
+                let devices: Array = JsCast::unchecked_from_js(devices);
 
-            for device in devices {
-                let device: UsbDevice = JsCast::unchecked_from_js(device);
-                if device.eq(&target_device) {
-                    JsFuture::from(device.open())
-                        .await
-                        .map_err(js_value_to_io_error)?;
+                for device in devices {
+                    let device: UsbDevice = JsCast::unchecked_from_js(device);
+                    if device.eq(&target_device) {
+                        web_sys::console::log_1(&"WebUSB: Opening device...".into());
+                        JsFuture::from(device.open())
+                            .await
+                            .map_err(js_value_to_io_error)?;
+                        web_sys::console::log_1(&"WebUSB: Device opened".into());
 
-                    let config_descriptors = extract_decriptors(&device).await?;
+                        // Select configuration 1 if not already configured
+                        if device.configuration().is_none() {
+                            web_sys::console::log_1(&"WebUSB: Selecting configuration 1...".into());
+                            JsFuture::from(device.select_configuration(1))
+                                .await
+                                .map_err(js_value_to_io_error)?;
+                            web_sys::console::log_1(&"WebUSB: Configuration selected".into());
+                        } else {
+                            web_sys::console::log_1(
+                                &format!(
+                                    "WebUSB: Already configured: {:?}",
+                                    device.configuration().map(|c| c.configuration_value())
+                                )
+                                .into(),
+                            );
+                        }
 
-                    #[allow(clippy::arc_with_non_send_sync)]
-                    return Ok(Arc::new(Self {
-                        // TODO: Check that we only open this once.
-                        device: Arc::new(UniqueUsbDevice::new(device)),
-                        config_descriptors,
-                        speed,
-                    }));
+                        let config_descriptors = extract_decriptors(&device).await?;
+
+                        #[allow(clippy::arc_with_non_send_sync)]
+                        return Ok(Arc::new(WebusbDevice {
+                            // TODO: Check that we only open this once.
+                            device: Arc::new(UniqueUsbDevice::new(device)),
+                            config_descriptors,
+                            speed,
+                        }));
+                    }
                 }
+                Err(IoError::other("device not found"))
             }
-            Err(Error::other("device not found"))
+            inner(target_device, speed).await.map_err(Error::from)
         })
     }
 
@@ -142,12 +169,13 @@ impl WebusbDevice {
             JsFuture::from(self.device.select_configuration(configuration))
                 .await
                 .map_err(|e| {
-                    Error::other(
+                    IoError::other(
                         e.as_string()
                             .unwrap_or_else(|| "No further error clarification available".into()),
                     )
                 })
                 .map(|_| ())
+                .map_err(Error::from)
         })
     }
 
@@ -156,12 +184,13 @@ impl WebusbDevice {
             JsFuture::from(self.device.reset())
                 .await
                 .map_err(|e| {
-                    Error::other(
+                    IoError::other(
                         e.as_string()
                             .unwrap_or_else(|| "No further error clarification available".into()),
                     )
                 })
                 .map(|_| ())
+                .map_err(Error::from)
         })
     }
 
@@ -172,7 +201,8 @@ impl WebusbDevice {
         ActualFuture::new(async move {
             JsFuture::from(self.device.claim_interface(interface_number))
                 .await
-                .map_err(js_value_to_io_error)?;
+                .map_err(js_value_to_io_error)
+                .map_err(Error::from)?;
 
             #[allow(clippy::arc_with_non_send_sync)]
             Ok(Arc::new(WebusbInterface {
@@ -199,12 +229,16 @@ impl WebusbDevice {
         desc_index: u8,
         language_id: u16,
         timeout: Duration,
-    ) -> Result<Vec<u8>, Error> {
-        get_descriptor(&self.device, desc_type, desc_index, language_id, timeout).await
+    ) -> Result<Vec<u8>, crate::GetDescriptorError> {
+        get_descriptor(&self.device, desc_type, desc_index, language_id, timeout)
+            .await
+            .map_err(|e| {
+                crate::GetDescriptorError::Transfer(crate::transfer::TransferError::Unknown(0))
+            })
     }
 }
 
-pub async fn extract_decriptors(device: &UsbDevice) -> Result<Vec<Vec<u8>>, Error> {
+pub async fn extract_decriptors(device: &UsbDevice) -> Result<Vec<Vec<u8>>, IoError> {
     let num_configurations = device.configurations().length() as usize;
     let mut config_descriptors = Vec::with_capacity(num_configurations);
 
@@ -231,7 +265,7 @@ pub async fn get_descriptor(
     desc_index: u8,
     language_id: u16,
     _timeout: Duration,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Vec<u8>, IoError> {
     let setup = UsbControlTransferParameters::new(
         language_id,
         web_sys::UsbRecipient::Device,
@@ -246,7 +280,7 @@ pub async fn get_descriptor(
     Ok(Uint8Array::new(&res.data().expect("a data buffer").buffer()).to_vec())
 }
 
-pub async fn extract_string(device: &UsbDevice, id: u16) -> Result<String, Error> {
+pub async fn extract_string(device: &UsbDevice, id: u16) -> Result<String, IoError> {
     let setup = UsbControlTransferParameters::new(
         0,
         web_sys::UsbRecipient::Device,
@@ -268,7 +302,7 @@ pub async fn extract_string(device: &UsbDevice, id: u16) -> Result<String, Error
             .map(|c| ((c[1] as u16) << 8) | c[0] as u16)
             .collect::<Vec<_>>(),
     )
-    .map_err(|_| Error::other("invalid utf16"))
+    .map_err(|_| IoError::other("invalid utf16"))
 }
 
 #[derive(Clone)]
@@ -311,12 +345,13 @@ impl WebusbInterface {
             )
             .await
             .map_err(|e| {
-                Error::other(
+                IoError::other(
                     e.as_string()
                         .unwrap_or_else(|| "No further error clarification available".into()),
                 )
             })
-            .map(|_| ())?;
+            .map(|_| ())
+            .map_err(Error::from)?;
 
             {
                 let mut state = self.state.lock().unwrap();
@@ -331,7 +366,7 @@ impl WebusbInterface {
         self.state.lock().unwrap().alt_setting
     }
 
-    pub async fn clear_halt(&self, endpoint: u8) -> Result<(), Error> {
+    pub async fn clear_halt(&self, endpoint: u8) -> Result<(), IoError> {
         let endpoint_in = endpoint & 0x80 != 0;
         JsFuture::from(self.device.device.clear_halt(
             if endpoint_in {
@@ -343,7 +378,7 @@ impl WebusbInterface {
         ))
         .await
         .map_err(|e| {
-            Error::other(
+            IoError::other(
                 e.as_string()
                     .unwrap_or_else(|| "No further error clarification available".into()),
             )
@@ -408,7 +443,7 @@ impl WebusbInterface {
     pub fn endpoint(
         self: &Arc<Self>,
         descriptor: EndpointDescriptor,
-    ) -> Result<WebusbEndpoint, ClaimEndpointError> {
+    ) -> Result<WebusbEndpoint, std::convert::Infallible> {
         let address = descriptor.address();
         let max_packet_size = descriptor.max_packet_size();
 
@@ -461,12 +496,17 @@ impl WebusbEndpoint {
     }
 
     pub(crate) fn submit(&mut self, buffer: Buffer) {
-        let transfer = self
+        let mut transfer = self
             .idle_transfer
             .take()
             .unwrap_or_else(|| Idle::new(self.inner.notify.clone(), super::TransferData::new()));
 
         let buffer = ManuallyDrop::new(buffer);
+
+        // Transfer the Buffer's memory to the TransferData
+        transfer.buf = buffer.ptr;
+        transfer.capacity = buffer.capacity;
+        transfer.requested_len = buffer.requested_len;
 
         let address = self.inner.address;
         let dir = Direction::from_address(self.inner.address);
@@ -484,49 +524,128 @@ impl WebusbEndpoint {
                     let array_obj = Object::try_from(&array).expect("an object");
                     let endpoint_number = address;
 
-                    let result = JsFuture::from(
-                        device
-                            .device
-                            .device
-                            .transfer_out_with_buffer_source(endpoint_number, array_obj)
-                            .expect("transfers are possible"),
-                    )
-                    .await
-                    .expect("transfers don't fail");
+                    web_sys::console::log_1(
+                        &format!(
+                            "WebUSB: transfer_out endpoint={} len={}",
+                            endpoint_number,
+                            data.len()
+                        )
+                        .into(),
+                    );
 
-                    let transfer_result: UsbOutTransferResult = JsCast::unchecked_from_js(result);
+                    let transfer_future = match device
+                        .device
+                        .device
+                        .transfer_out_with_buffer_source(endpoint_number, array_obj)
+                    {
+                        Ok(promise) => JsFuture::from(promise),
+                        Err(e) => {
+                            web_sys::console::error_1(
+                                &format!(
+                                    "WebUSB: transfer_out_with_buffer_source failed immediately"
+                                )
+                                .into(),
+                            );
+                            unsafe {
+                                (*ptr).set_error(js_value_to_transfer_error(e));
+                                notify_completion::<TransferData>(ptr);
+                            }
+                            return;
+                        }
+                    };
 
-                    unsafe {
-                        (*ptr).status = transfer_result.status();
-                        (*ptr).actual_len = transfer_result.bytes_written();
-                        (*ptr).actual_len = data.len() as u32;
-                        notify_completion::<TransferData>(ptr)
+                    match transfer_future.await {
+                        Ok(result) => {
+                            let transfer_result: UsbOutTransferResult =
+                                JsCast::unchecked_from_js(result);
+
+                            web_sys::console::log_1(
+                                &format!(
+                                    "WebUSB: transfer_out success, status={:?} bytes_written={}",
+                                    transfer_result.status(),
+                                    transfer_result.bytes_written()
+                                )
+                                .into(),
+                            );
+
+                            unsafe {
+                                (*ptr).status = transfer_result.status();
+                                (*ptr).actual_len = transfer_result.bytes_written();
+                                notify_completion::<TransferData>(ptr)
+                            }
+                        }
+                        Err(e) => {
+                            web_sys::console::error_1(
+                                &format!("WebUSB: transfer_out await failed").into(),
+                            );
+                            unsafe {
+                                (*ptr).set_error(js_value_to_transfer_error(e));
+                                notify_completion::<TransferData>(ptr);
+                            }
+                        }
                     }
                 }
                 Direction::In => {
                     let endpoint_number = address & (!0x80);
-                    let mut data = buffer.to_vec();
-                    let len = data.len() as u32;
-                    let result =
-                        JsFuture::from(device.device.device.transfer_in(endpoint_number, len))
-                            .await
-                            .expect("transfers are possible");
+                    // For IN transfers, use requested_len (not data.len() which is 0)
+                    let requested_len = buffer.requested_len;
 
-                    let transfer_result: UsbInTransferResult = JsCast::unchecked_from_js(result);
-                    let received_data = Uint8Array::new(
-                        &transfer_result
-                            .data()
-                            .expect("a data buffer is present")
-                            .buffer(),
+                    web_sys::console::log_1(
+                        &format!(
+                            "WebUSB: transfer_in endpoint={} len={}",
+                            endpoint_number, requested_len
+                        )
+                        .into(),
                     );
-                    data.resize(received_data.length() as usize, 0);
-                    received_data.copy_to(&mut data[..received_data.length() as usize]);
 
-                    unsafe {
-                        (*ptr).status = transfer_result.status();
-                        (*ptr).actual_len = len;
-                        (*ptr).requested_len = len;
-                        notify_completion::<TransferData>(ptr)
+                    match JsFuture::from(
+                        device
+                            .device
+                            .device
+                            .transfer_in(endpoint_number, requested_len),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let transfer_result: UsbInTransferResult =
+                                JsCast::unchecked_from_js(result);
+                            let received_data = Uint8Array::new(
+                                &transfer_result
+                                    .data()
+                                    .expect("a data buffer is present")
+                                    .buffer(),
+                            );
+                            let actual_len = received_data.length();
+
+                            web_sys::console::log_1(
+                                &format!(
+                                    "WebUSB: transfer_in success, status={:?} actual_len={}",
+                                    transfer_result.status(),
+                                    actual_len
+                                )
+                                .into(),
+                            );
+
+                            unsafe {
+                                (*ptr).status = transfer_result.status();
+                                (*ptr).actual_len = actual_len;
+                                (*ptr).requested_len = requested_len;
+                                // Copy received data back to the buffer
+                                let dest =
+                                    std::slice::from_raw_parts_mut((*ptr).buf, actual_len as usize);
+                                received_data.copy_to(dest);
+                                notify_completion::<TransferData>(ptr)
+                            }
+                        }
+                        Err(e) => {
+                            web_sys::console::error_1(
+                                &format!("WebUSB: transfer_in await failed").into(),
+                            );
+                            unsafe {
+                                (*ptr).set_error(js_value_to_transfer_error(e));
+                                notify_completion::<TransferData>(ptr);
+                            }
+                        }
                     }
                 }
             }
@@ -546,6 +665,24 @@ impl WebusbEndpoint {
         }
     }
 
+    pub(crate) fn submit_err(&mut self, buffer: Buffer, err: TransferError) {
+        // Create a transfer that immediately completes with an error
+        let mut transfer = self
+            .idle_transfer
+            .take()
+            .unwrap_or_else(|| Idle::new(self.inner.notify.clone(), super::TransferData::new()));
+
+        // Set the buffer on the transfer data
+        let buffer = ManuallyDrop::new(buffer);
+        transfer.buf = buffer.ptr;
+        transfer.capacity = buffer.capacity;
+        transfer.requested_len = buffer.requested_len;
+        transfer.actual_len = 0;
+        transfer.set_error(err);
+
+        self.pending.push_back(transfer.simulate_complete());
+    }
+
     pub(crate) fn clear_halt(&self) -> impl MaybeFuture<Output = Result<(), Error>> {
         let device = self.inner.interface.device.clone();
         let endpoint = self.inner.address;
@@ -561,12 +698,13 @@ impl WebusbEndpoint {
             ))
             .await
             .map_err(|e| {
-                Error::other(
+                IoError::other(
                     e.as_string()
                         .unwrap_or_else(|| "No further error clarification available".into()),
                 )
             })
             .map(|_| ())
+            .map_err(Error::from)
         })
     }
 }

@@ -183,7 +183,12 @@ mod platform;
 
 pub mod descriptors;
 mod enumeration;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub use enumeration::BusInfo;
 pub use enumeration::{DeviceId, DeviceInfo, InterfaceInfo, Speed, UsbControllerType};
 
@@ -192,7 +197,12 @@ pub use device::{Device, Endpoint, Interface};
 
 pub mod transfer;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub mod hotplug;
 
 mod maybe_future;
@@ -217,7 +227,12 @@ pub use error::{ActiveConfigurationError, Error, ErrorKind, GetDescriptorError};
 ///     .expect("device not connected");
 /// # }
 /// ```
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub fn list_devices() -> impl MaybeFuture<Output = Result<impl Iterator<Item = DeviceInfo>, Error>>
 {
     platform::list_devices()
@@ -244,9 +259,25 @@ pub fn list_devices() -> impl MaybeFuture<Output = Result<impl Iterator<Item = D
 ///     .collect();
 /// # }
 /// ```
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub fn list_buses() -> impl MaybeFuture<Output = Result<impl Iterator<Item = BusInfo>, Error>> {
     platform::list_buses()
+}
+
+/// Create a DeviceInfo from a WebUSB UsbDevice obtained via requestDevice().
+///
+/// This is useful when you need to use a device that was already granted permission
+/// through the WebUSB requestDevice() flow, without having to re-list and re-open devices.
+#[cfg(target_arch = "wasm32")]
+pub fn device_info_from_webusb(
+    device: web_sys::UsbDevice,
+) -> impl MaybeFuture<Output = Result<DeviceInfo, Error>> {
+    platform::device_info_from_webusb(device)
 }
 
 /// Get a [`Stream`][`futures_core::Stream`] that yields an
@@ -286,7 +317,12 @@ pub fn list_buses() -> impl MaybeFuture<Output = Result<impl Iterator<Item = Bus
 ///     when the `Connected` event is emitted. If you are immediately opening the device
 ///     and claiming an interface when receiving a `Connected` event,
 ///     you should retry after a short delay if opening or claiming fails.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+))]
 pub fn watch_devices() -> Result<hotplug::HotplugWatch, Error> {
     Ok(hotplug::HotplugWatch(platform::HotplugWatch::new()?))
 }

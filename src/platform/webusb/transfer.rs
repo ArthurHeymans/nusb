@@ -12,6 +12,8 @@ pub struct TransferData {
     pub(super) requested_len: u32,
     pub(super) actual_len: u32,
     pub(super) status: UsbTransferStatus,
+    /// Error to return instead of using status, if Some
+    pub(super) error_override: Option<TransferError>,
 }
 
 impl Drop for TransferData {
@@ -33,12 +35,20 @@ impl TransferData {
             requested_len,
             actual_len: 0,
             status: UsbTransferStatus::Ok,
+            error_override: None,
         }
     }
 
     #[inline]
     pub fn status(&self) -> Result<(), TransferError> {
+        if let Some(err) = self.error_override {
+            return Err(err);
+        }
         webusb_status_to_nusb_transfer_error(self.status)
+    }
+
+    pub(super) fn set_error(&mut self, err: TransferError) {
+        self.error_override = Some(err);
     }
 
     /// # Safety

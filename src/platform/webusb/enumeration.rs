@@ -7,7 +7,7 @@ use crate::{
     descriptors::ConfigurationDescriptor,
     maybe_future::{future::ActualFuture, Ready},
     platform::webusb::device::{extract_decriptors, extract_string},
-    BusInfo, DeviceInfo, Error, InterfaceInfo, MaybeFuture,
+    BusInfo, DeviceInfo, Error, ErrorKind, InterfaceInfo, MaybeFuture,
 };
 
 use super::UniqueUsbDevice;
@@ -16,26 +16,29 @@ pub fn list_devices() -> impl MaybeFuture<Output = Result<impl Iterator<Item = D
 {
     async fn inner() -> Result<Vec<DeviceInfo>, Error> {
         let usb = super::usb()?;
-        let devices = JsFuture::from(usb.get_devices())
-            .await
-            .map_err(|e| Error::other(format!("WebUSB devices could not be listed: {e:?}")))?;
+        let devices = JsFuture::from(usb.get_devices()).await.map_err(|e| {
+            log::error!("WebUSB devices could not be listed: {e:?}");
+            Error::new(ErrorKind::Other, "WebUSB devices could not be listed")
+        })?;
 
         let devices: Array = JsCast::unchecked_from_js(devices);
 
         let mut result = vec![];
         for device in devices {
             let device: UsbDevice = JsCast::unchecked_from_js(device);
-            JsFuture::from(device.open())
-                .await
-                .map_err(|e| Error::other(format!("WebUSB device could not be opened: {e:?}")))?;
+            JsFuture::from(device.open()).await.map_err(|e| {
+                log::error!("WebUSB device could not be opened: {e:?}");
+                Error::new(ErrorKind::Other, "WebUSB device could not be opened")
+            })?;
 
             let device = Arc::new(UniqueUsbDevice::new(device));
 
             let device_info = device_to_info(device.clone()).await?;
             result.push(device_info);
-            JsFuture::from(device.close())
-                .await
-                .map_err(|e| Error::other(format!("WebUSB device could not be closed: {e:?}")))?;
+            JsFuture::from(device.close()).await.map_err(|e| {
+                log::error!("WebUSB device could not be closed: {e:?}");
+                Error::new(ErrorKind::Other, "WebUSB device could not be closed")
+            })?;
         }
 
         Ok(result)
@@ -48,14 +51,66 @@ pub fn list_buses() -> impl MaybeFuture<Output = Result<impl Iterator<Item = Bus
     Ready(Ok(vec![].into_iter()))
 }
 
+/// Create a DeviceInfo from a UsbDevice that was obtained via requestDevice().
+///
+/// This is useful when you need to use a device that was already granted permission
+/// through the WebUSB requestDevice() flow, without having to re-list and re-open devices.
+///
+/// The device will be opened if not already open, and descriptors will be read.
+/// The device is left open after this call.
+pub fn device_info_from_webusb(
+    device: UsbDevice,
+) -> impl MaybeFuture<Output = Result<DeviceInfo, Error>> {
+    ActualFuture::new(async move {
+        log::info!(
+            "device_info_from_webusb: device.opened() = {}",
+            device.opened()
+        );
+        log::info!(
+            "device_info_from_webusb: vendor_id = 0x{:04x}, product_id = 0x{:04x}",
+            device.vendor_id(),
+            device.product_id()
+        );
+
+        // Open the device if it's not already open
+        if !device.opened() {
+            log::info!("device_info_from_webusb: opening device...");
+            JsFuture::from(device.open()).await.map_err(|e| {
+                let err_str = format!("{:?}", e);
+                log::error!("WebUSB device could not be opened: {}", err_str);
+                // Also log to browser console
+                web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "WebUSB device.open() failed: {}",
+                    err_str
+                )));
+                Error::new(ErrorKind::Other, "WebUSB device could not be opened")
+            })?;
+            log::info!("device_info_from_webusb: device opened successfully");
+        } else {
+            log::info!("device_info_from_webusb: device was already open");
+        }
+
+        let device = Arc::new(UniqueUsbDevice::new(device));
+        log::info!("device_info_from_webusb: extracting device info...");
+        let device_info = device_to_info(device.clone()).await?;
+        log::info!("device_info_from_webusb: device info extracted");
+
+        // Close the device so it can be reopened via DeviceInfo::open()
+        log::info!("device_info_from_webusb: closing device...");
+        JsFuture::from(device.close()).await.map_err(|e| {
+            log::error!("WebUSB device could not be closed: {e:?}");
+            Error::new(ErrorKind::Other, "WebUSB device could not be closed")
+        })?;
+        log::info!("device_info_from_webusb: device closed");
+
+        Ok(device_info)
+    })
+}
+
 pub(crate) async fn device_to_info(device: Arc<UniqueUsbDevice>) -> Result<DeviceInfo, Error> {
     Ok(DeviceInfo {
-        bus_id: "webusb".to_string(),
-        device_address: 0,
         vendor_id: device.vendor_id(),
         product_id: device.product_id(),
-        device_version: ((device.device_version_major() as u16) << 8)
-            | device.device_version_minor() as u16,
         usb_version: ((device.usb_version_major() as u16) << 8) | device.usb_version_minor() as u16,
         class: device.device_class(),
         subclass: device.device_subclass(),
@@ -89,8 +144,6 @@ pub(crate) async fn device_to_info(device: Arc<UniqueUsbDevice>) -> Result<Devic
             }
             interfaces
         },
-        port_chain: vec![],
-        max_packet_size_0: 255,
         device: device.clone(),
     })
 }

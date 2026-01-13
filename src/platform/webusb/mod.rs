@@ -7,7 +7,7 @@ use std::io::Error;
 
 pub(crate) use transfer::TransferData;
 
-pub use enumeration::{list_buses, list_devices};
+pub use enumeration::{device_info_from_webusb, list_buses, list_devices};
 
 pub(crate) use device::UniqueUsbDevice;
 pub(crate) use device::WebusbDevice as Device;
@@ -25,6 +25,10 @@ use web_sys::Window;
 use web_sys::WorkerGlobalScope;
 
 use crate::transfer::TransferError;
+
+pub fn format_os_error_code(f: &mut std::fmt::Formatter<'_>, code: u32) -> std::fmt::Result {
+    write!(f, "WebUSB error code {}", code)
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceId {
@@ -91,10 +95,13 @@ pub fn js_value_to_io_error(value: JsValue) -> std::io::Error {
 }
 
 pub fn js_value_to_transfer_error(value: JsValue) -> TransferError {
-    let value: js_sys::Error = value
+    let error: js_sys::Error = value
         .dyn_into()
         .unwrap_or_else(|_| js_sys::Error::new("error could not be constructed"));
-    tracing::info!("{:?}", value);
+    let message = error.message().as_string().unwrap_or_default();
+    let name = error.name().as_string().unwrap_or_default();
+    web_sys::console::error_1(&format!("WebUSB transfer error: {} - {}", name, message).into());
+    tracing::info!("WebUSB transfer error: {} - {}", name, message);
     // TODO: Fix this to return the correct error.
     TransferError::Fault
 }
