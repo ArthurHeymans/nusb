@@ -203,7 +203,10 @@ impl DeviceDescriptor {
         };
         let buf: [u8; DESCRIPTOR_LEN_DEVICE as usize] = buf.try_into().ok()?;
         if buf[0] < DESCRIPTOR_LEN_DEVICE {
-            warn!("invalid config descriptor bLength. expected {DESCRIPTOR_LEN_CONFIGURATION}, got {}", buf[0]);
+            warn!(
+                "invalid device descriptor bLength. expected {DESCRIPTOR_LEN_DEVICE}, got {}",
+                buf[0]
+            );
             None
         } else if buf[1] != DESCRIPTOR_TYPE_DEVICE {
             warn!(

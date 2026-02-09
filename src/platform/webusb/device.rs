@@ -20,7 +20,7 @@ use crate::{
     bitset::EndpointBitSet,
     descriptors::{
         ConfigurationDescriptor, DeviceDescriptor, EndpointDescriptor,
-        DESCRIPTOR_TYPE_CONFIGURATION,
+        DESCRIPTOR_TYPE_CONFIGURATION, DESCRIPTOR_TYPE_DEVICE,
     },
     maybe_future::future::ActualFuture,
     transfer::{
@@ -74,6 +74,7 @@ pub mod private {
 #[derive(Clone)]
 pub(crate) struct WebusbDevice {
     pub device: Arc<UniqueUsbDevice>,
+    device_descriptor: DeviceDescriptor,
     config_descriptors: Vec<Vec<u8>>,
     speed: Option<Speed>,
 }
@@ -123,10 +124,28 @@ impl WebusbDevice {
 
                         let config_descriptors = extract_decriptors(&device).await?;
 
+                        // Fetch the device descriptor (type 0x01)
+                        let device_descriptor_bytes = get_descriptor(
+                            &device,
+                            DESCRIPTOR_TYPE_DEVICE,
+                            0,
+                            0,
+                            Duration::from_millis(500),
+                        )
+                        .await?;
+                        let device_descriptor = DeviceDescriptor::new(&device_descriptor_bytes)
+                            .ok_or_else(|| {
+                                IoError::new(
+                                    IoErrorKind::InvalidData,
+                                    "failed to parse USB device descriptor",
+                                )
+                            })?;
+
                         #[allow(clippy::arc_with_non_send_sync)]
                         return Ok(Arc::new(WebusbDevice {
                             // TODO: Check that we only open this once.
                             device: Arc::new(UniqueUsbDevice::new(device)),
+                            device_descriptor,
                             config_descriptors,
                             speed,
                         }));
@@ -139,7 +158,7 @@ impl WebusbDevice {
     }
 
     pub(crate) fn device_descriptor(&self) -> DeviceDescriptor {
-        DeviceDescriptor::new(&self.config_descriptors[0]).unwrap()
+        self.device_descriptor.clone()
     }
 
     pub(crate) fn speed(&self) -> Option<Speed> {
